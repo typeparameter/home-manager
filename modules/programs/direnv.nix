@@ -77,14 +77,25 @@ in
 
     enableFishIntegration = lib.hm.shell.mkFishIntegrationOption { inherit config; };
 
+    enableGitIntegration = mkEnableOption "Git integration" // {
+      description = ''
+        Whether to configure Git to globally ignore {file}`.direnv/`.
+      '';
+    };
+
     enableNushellIntegration = lib.hm.shell.mkNushellIntegrationOption { inherit config; };
 
     enableZshIntegration = lib.hm.shell.mkZshIntegrationOption { inherit config; };
 
     nix-direnv = {
-      enable = mkEnableOption ''
-        [nix-direnv](https://github.com/nix-community/nix-direnv),
-        a fast, persistent use_nix implementation for direnv'';
+      enable =
+        mkEnableOption ''
+          [nix-direnv](https://github.com/nix-community/nix-direnv),
+          a fast, persistent use_nix implementation for direnv''
+        // {
+          default = true;
+          example = false;
+        };
 
       package = mkPackageOption pkgs "nix-direnv" { };
     };
@@ -94,7 +105,7 @@ in
         [mise](https://mise.jdx.dev/direnv.html),
         integration of use_mise for direnv'';
 
-      package = mkPackageOption pkgs "mise" { };
+      package = mkPackageOption pkgs "mise" { nullable = true; };
     };
 
     silent = mkEnableOption "silent mode, that is, disabling direnv logging";
@@ -115,6 +126,10 @@ in
             log_filter = "^$";
           };
         };
+
+        git.ignores = mkIf cfg.enableGitIntegration [
+          ".direnv/"
+        ];
 
         bash.initExtra = mkIf cfg.enableBashIntegration (
           # Using `mkAfter` to make it more likely to appear after other
@@ -195,7 +210,7 @@ in
 
         "direnv/lib/hm-mise.sh" = mkIf cfg.mise.enable {
           text = ''
-            eval "$(${getExe cfg.mise.package} direnv activate)"
+            eval "$(${if cfg.mise.package != null then getExe cfg.mise.package else "mise"} direnv activate)"
           '';
         };
       };

@@ -157,6 +157,12 @@
     githubId = 32838899;
     name = "Daniel Wagenknecht";
   };
+  ekhh = {
+    name = "EKHH";
+    email = "90589480+ekhh@users.noreply.github.com";
+    github = "ekhh";
+    githubId = 90589480;
+  };
   elanora96 = {
     name = "Elanora Manson";
     email = "git@elanora.lol";
@@ -244,6 +250,12 @@
         fingerprint = "AD32 73D4 5E0E 9478 E826  543F EDB2 C634 166A E6AD";
       }
     ];
+  };
+  ilovelinux = {
+    name = "Antonio Spadaro";
+    email = "nix+home-manager@ilovelinux.dev";
+    github = "ilovelinux";
+    githubId = 9268789;
   };
   isaacST08 = {
     name = "Isaac Shiells Thomas";
@@ -336,11 +348,6 @@
     email = "git@sphalerite.org";
     github = "lheckemann";
     githubId = 341954;
-  };
-  libewa = {
-    email = "libewa-git@icloud.com";
-    github = "libewa";
-    githubId = 67926131;
   };
   lilyinstarlight = {
     email = "lily@lily.flowers";
@@ -438,12 +445,6 @@
     email = "nate@natecox.dev";
     github = "natecox";
     githubId = 2782695;
-  };
-  nikp123 = {
-    name = "nikp123";
-    email = "nikp123@users.noreply.github.com";
-    github = "nikp123";
-    githubId = 4696350;
   };
   NitroSniper = {
     name = "Nitro Sniper";
@@ -556,6 +557,12 @@
     email = "saymon.nicho@pucp.edu.pe";
     github = "superflash41";
     githubId = 102434258;
+  };
+  vidhanio = {
+    name = "Vidhan Bhatt";
+    email = "me@vidhan.io";
+    github = "vidhanio";
+    githubId = 41439633;
   };
   will-lol = {
     name = "William Bradshaw";

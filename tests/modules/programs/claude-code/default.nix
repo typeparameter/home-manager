@@ -17,10 +17,13 @@
   claude-code-commands-dir = ./commands-dir.nix;
   claude-code-hooks-dir = ./hooks-dir.nix;
   claude-code-skills-dir = ./skills-dir.nix;
+  claude-code-skills-path-not-directory = ./skills-path-not-directory.nix;
+  claude-code-skills-store-path = ./skills-store-path.nix;
   claude-code-skills-store-path-dir = ./skills-store-path-dir.nix;
   claude-code-skills-subdir = ./skills-subdir.nix;
   claude-code-agents-path = ./agents-path.nix;
   claude-code-commands-path = ./commands-path.nix;
+  claude-code-hooks-path = ./hooks-path.nix;
   claude-code-skills-path = ./skills-path.nix;
   claude-code-legacy-memory-text = ./legacy-memory-text.nix;
   claude-code-legacy-memory-source-and-skills-dir = ./legacy-memory-source-and-skills-dir.nix;

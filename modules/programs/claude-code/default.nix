@@ -92,6 +92,14 @@ in
         mkSkillEntry
         ;
 
+      # Manifest name of the synthesized plugin that carries generated MCP and
+      # LSP config. Claude Code derives the MCP tool namespace from this name
+      # (`mcp__plugin_<name>_<server>__<tool>`), so it is kept short to reduce
+      # token overhead. The personal-plugin directory entry keeps the longer,
+      # stable `claude-code-home-manager` name to avoid colliding with user
+      # plugins or skills. See issue #9446.
+      generatedPluginName = "hm";
+
       mergedMcpServers =
         transformedMcpServers
         // lib.mapAttrs (_: server: removeAttrs (lib.hm.mcp.addType server) [ "enabled" ]) cfg.mcpServers;
@@ -110,7 +118,7 @@ in
         ''
           install -Dm644 ${
             jsonFormat.generate "claude-code-plugin.json" {
-              name = "claude-code-home-manager";
+              name = generatedPluginName;
             }
           } $out/.claude-plugin/plugin.json
         ''
@@ -133,6 +141,12 @@ in
 
       pluginEntries =
         lib.optional (generatedPluginFiles != [ ]) {
+          # Keep the directory name as the long, stable `claude-code-home-manager`
+          # rather than the short `generatedPluginName`: this entry becomes a
+          # personal-plugin directory under `skills/`, and a short name like `hm`
+          # would collide with valid `programs.claude-code.plugins.hm` or
+          # `skills.hm`, failing the uniqueness assertions. The MCP tool prefix
+          # already uses the short manifest name above.
           name = "claude-code-home-manager";
           source = generatedPlugin;
         }
@@ -164,15 +178,33 @@ in
 
       pluginNames = map (plugin: plugin.name) pluginEntries;
 
-      skillsAreAttrs = builtins.isAttrs cfg.skills;
       skillsArePath = lib.hm.strings.isPathLike cfg.skills;
-      skillsAreDirectory = skillsArePath && lib.pathIsDirectory cfg.skills;
+      skillsAreAttrs = !skillsArePath && builtins.isAttrs cfg.skills;
       skillNames = lib.attrNames (
         if skillsAreAttrs then
           cfg.skills
         else
-          lib.optionalAttrs skillsAreDirectory (builtins.readDir cfg.skills)
+          lib.optionalAttrs (lib.isPath cfg.skills && lib.pathIsDirectory cfg.skills) (
+            builtins.readDir cfg.skills
+          )
       );
+
+      checkedSkillsDirectory = pkgs.runCommandLocal "claude-code-skills" { } ''
+        source=${lib.escapeShellArg "${cfg.skills}"}
+        if [[ ! -d "$source" ]]; then
+          echo "programs.claude-code.skills must be a directory when set to a path" >&2
+          exit 1
+        fi
+        ${lib.optionalString supportsPersonalPlugins (
+          lib.concatMapStringsSep "\n" (name: ''
+            if [[ -e "$source"/${lib.escapeShellArg name} || -L "$source"/${lib.escapeShellArg name} ]]; then
+              echo "programs.claude-code.skills and managed plugins must have unique directory names" >&2
+              exit 1
+            fi
+          '') pluginNames
+        )}
+        ln -s "$source" "$out"
+      '';
 
       # Each plugin is linked as a single directory symlink rather than
       # recursively. Claude Code discovers a plugin's `agents/` and `commands/`
@@ -232,7 +264,7 @@ in
             message = "Managed Claude Code MCP, LSP, and plugins require `programs.claude-code.package` version 2.1.76 or later";
           }
           {
-            assertion = !skillsArePath || skillsAreDirectory;
+            assertion = !lib.isPath cfg.skills || lib.pathIsDirectory cfg.skills;
             message = "`programs.claude-code.skills` must be a directory when set to a path";
           }
           {
@@ -308,7 +340,7 @@ in
           (mkRecursiveDirAttrs "rules" cfg.rulesDir)
           (lib.mkIf skillsArePath {
             "${cfg.configDir}/skills" = {
-              source = cfg.skills;
+              source = if lib.isPath cfg.skills then cfg.skills else checkedSkillsDirectory;
               recursive = true;
             };
           })

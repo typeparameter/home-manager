@@ -143,6 +143,8 @@ in
       '';
     };
 
+    enableDefaultConfig = lib.mkEnableOption "including niri's default config from the {option}`package`";
+
     extraConfigEarly = lib.mkOption {
       type = lib.types.lines;
       default = "";
@@ -167,6 +169,10 @@ in
         assertion = cfg.checkConfig -> cfg.package != null;
         message = "wayland.windowManager.niri.checkConfig requires a non-null package";
       }
+      {
+        assertion = cfg.enableDefaultConfig -> (cfg.package ? src && lib.isStringLike cfg.package.src);
+        message = "wayland.windowManager.niri.enableDefaultConfig requires a package with a string-like `src` attribute";
+      }
     ];
 
     home.packages = lib.concatLists [
@@ -188,10 +194,14 @@ in
           escapeBackslashes = true;
           escapeTabs = true;
         };
-        settings = lib.trim (toKDL cfg.settings);
+        settings = lib.removeSuffix "\n" (toKDL cfg.settings);
+        defaultConfig = lib.optionalString (
+          cfg.enableDefaultConfig && cfg.package ? src && lib.isStringLike cfg.package.src
+        ) ''include "${cfg.package.src}/resources/default-config.kdl"'';
         configLines = lib.concatStringsSep "\n" (
           lib.filter (line: line != "") [
             cfg.extraConfigEarly
+            defaultConfig
             settings
             cfg.extraConfig
           ]

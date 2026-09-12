@@ -55,6 +55,8 @@ let
         name = sourceName;
       };
 
+  putterStatePath = "${config.xdg.stateHome}/home-manager/putter-state.json";
+
 in
 
 {
@@ -88,10 +90,43 @@ in
       '';
     };
 
+    home.fileActivator = lib.mkOption {
+      type =
+        with lib.types;
+        enum [
+          "legacy"
+          "putter"
+        ];
+      default = "legacy";
+      example = "putter";
+      visible = false;
+      description = ''
+        The tooling to use to place files during activation.
+
+        The legacy option (currently the default) is the built-in tooling that
+        is very robust, but is limited in future potential.
+
+        The putter option is a new external tool that may replace the legacy
+        alternative in the future. It is not as hardened as the legacy
+        alternative but will allow future features such as file copying.
+
+        This option should be considered experimental and is therefore hidden
+        from documentation at this time.
+      '';
+    };
+
     home-files = lib.mkOption {
       type = lib.types.package;
       internal = true;
       description = "Package to contain all home files";
+    };
+
+    home.internal = {
+      filePutterConfig = lib.mkOption {
+        type = lib.types.package;
+        internal = true;
+        description = "Putter configuration.";
+      };
     };
   };
 
@@ -149,21 +184,55 @@ in
 
         storeDir = lib.escapeShellArg builtins.storeDir;
 
-        check = pkgs.replaceVars ./files/check-link-targets.sh {
+        legacyCheckScript = pkgs.replaceVars ./files/check-link-targets.sh {
           inherit (config.lib.bash) initHomeManagerLib;
           inherit forcedPaths storeDir;
         };
-      in
-      ''
-        function checkNewGenCollision() {
-          local newGenFiles
-          newGenFiles="$(readlink -e "$newGenPath/home-files")"
-          find "$newGenFiles" \( -type f -or -type l \) \
-              -exec bash ${check} "$newGenFiles" {} +
-        }
 
-        checkNewGenCollision || exit 1
-      ''
+        legacyCheckLinkTargets = ''
+          function checkNewGenCollision() {
+            local newGenFiles
+            newGenFiles="$(readlink -e "$newGenPath/home-files")"
+            find "$newGenFiles" \( -type f -or -type l \) \
+                -exec bash ${legacyCheckScript} "$newGenFiles" {} +
+          }
+
+          checkNewGenCollision || exit 1
+        '';
+
+        # If Putter is not enabled, then generate a fake state file to allow
+        # switching to Putter in the future.
+        putterCompatState =
+          let
+            putter = import ./lib/putter.nix { inherit lib; };
+            manifest = putter.mkPutterCompatState {
+              sourceBaseDirectory = config.home-files;
+              targetBaseDirectory = config.home.homeDirectory;
+              fileEntries = cfg;
+            };
+          in
+          pkgs.writeText "hm-putter-state.json" manifest;
+
+        putterCheckLinkTargets = ''
+          # If no Putter state file exists already, then we assume that we are
+          # moving from a legacy file placement setup to a Putter one. We
+          # therefore copy in a Putter compatible state file to avoid conflict
+          # errors from Putter.
+          if [[ ! -f ${lib.escapeShellArg putterStatePath} ]]; then
+            run install -Dp -m600 $VERBOSE_ARG ${
+              lib.escapeShellArgs [
+                putterCompatState
+                putterStatePath
+              ]
+            }
+          fi
+
+          ${lib.getExe pkgs.putter} check $VERBOSE_ARG \
+            --state-file ${lib.escapeShellArg putterStatePath} \
+            ${config.home.internal.filePutterConfig}
+        '';
+      in
+      if config.home.fileActivator == "putter" then putterCheckLinkTargets else legacyCheckLinkTargets
     );
 
     # This activation script will
@@ -186,12 +255,98 @@ in
     # source and target generation.
     home.activation.linkGeneration = lib.hm.dag.entryAfter [ "writeBoundary" ] (
       let
-        link = pkgs.writeShellScript "link" ''
+        storeDir = lib.escapeShellArg builtins.storeDir;
+
+        legacyLink = pkgs.writeShellScript "link" ''
           ${config.lib.bash.initHomeManagerLib}
 
           newGenFiles="$1"
           shift
+
+          # Classify every target using bash builtins only: even one forked
+          # process per file costs several milliseconds on some platforms
+          # (notably darwin), which dominates activation time when a profile
+          # carries hundreds of links. Targets occupied by a regular file or
+          # directory keep the original per-file handling (backup and
+          # identical-content skip) on the slow path below.
+          declare -a symlinkTargets=() symlinkSources=()
+          declare -a linkSources=() linkDirs=()
+          declare -a slowSources=()
           for sourcePath in "$@" ; do
+            relativePath="''${sourcePath#$newGenFiles/}"
+            targetPath="$HOME/$relativePath"
+            if [[ -L "''${targetPath%/*}" ]] ; then
+              # The parent directory is itself a symlink (e.g. a stale
+              # whole-directory link from an older layout). The batched
+              # `ln -n -t` below would refuse it ("Not a directory"), while
+              # the original per-file `ln -T` traverses it; keep upstream
+              # behavior on the slow path.
+              slowSources+=("$sourcePath")
+            elif [[ -L "$targetPath" ]] ; then
+              symlinkTargets+=("$targetPath")
+              symlinkSources+=("$sourcePath")
+            elif [[ -e "$targetPath" ]] ; then
+              slowSources+=("$sourcePath")
+            else
+              linkSources+=("$sourcePath")
+              linkDirs+=("''${targetPath%/*}")
+            fi
+          done
+
+          # Resolve all existing symlinks with a single readlink call and
+          # relink only those not already pointing at the new generation.
+          if [[ ''${#symlinkTargets[@]} -gt 0 ]] ; then
+            i=0
+            while IFS= read -r -d "" currentSource ; do
+              if [[ "$currentSource" != "''${symlinkSources[i]}" ]] ; then
+                linkSources+=("''${symlinkSources[i]}")
+                linkDirs+=("''${symlinkTargets[i]%/*}")
+              fi
+              i=$(( i + 1 ))
+            done < <(readlink -z -- "''${symlinkTargets[@]}")
+
+            # readlink prints no record for an operand that vanished since
+            # the classification loop above, and its exit status is lost
+            # through the process substitution. A missing record shifts
+            # every later result onto the wrong source, so the links after
+            # it would be compared against someone else's target and left
+            # stale. The record count is the only signal that happened.
+            if [[ $i -ne ''${#symlinkTargets[@]} ]] ; then
+              errorEcho "A link target changed while resolving symlinks; retry activation."
+              exit 1
+            fi
+          fi
+
+          # Create all missing parent directories in one mkdir call.
+          declare -A missingDirs=()
+          for targetDir in "''${linkDirs[@]}" ; do
+            [[ -d "$targetDir" ]] || missingDirs[$targetDir]=1
+          done
+          if [[ ''${#missingDirs[@]} -gt 0 ]] ; then
+            run mkdir -p $VERBOSE_ARG -- "''${!missingDirs[@]}" || exit 1
+          fi
+
+          # Group the pending links by parent directory, one ln call per
+          # directory. The link name always equals the source basename, and
+          # -f -n together replace a stale symlink even when it points at a
+          # directory (the case -T guarded against in the per-file version;
+          # a regular directory in the way takes the slow path instead and
+          # fails there just like it always did).
+          declare -A dirBatches=()
+          for i in "''${!linkSources[@]}" ; do
+            dirBatches[''${linkDirs[i]}]+="$i "
+          done
+          for targetDir in "''${!dirBatches[@]}" ; do
+            batch=()
+            for i in ''${dirBatches[$targetDir]} ; do
+              batch+=("''${linkSources[i]}")
+            done
+            run ln -sfn $VERBOSE_ARG -t "$targetDir" -- "''${batch[@]}" || exit 1
+          done
+
+          # Slow path: the target exists and is not a symlink. This is the
+          # original per-file logic, kept verbatim for the rare collisions.
+          for sourcePath in "''${slowSources[@]}" ; do
             relativePath="''${sourcePath#$newGenFiles/}"
             targetPath="$HOME/$relativePath"
             if [[ -e "$targetPath" && ! -L "$targetPath" ]] ; then
@@ -209,7 +364,7 @@ in
             fi
 
             if [[ -e "$targetPath" && ! -L "$targetPath" ]] && cmp -s "$sourcePath" "$targetPath" ; then
-              # The target exists but is identical – don't do anything.
+              # The target exists but is identical - don't do anything.
               verboseEcho "Skipping '$targetPath' as it is identical to '$sourcePath'"
             else
               # Place that symlink, --force
@@ -220,12 +375,12 @@ in
           done
         '';
 
-        cleanup = pkgs.writeShellScript "cleanup" ''
+        legacyCleanup = pkgs.writeShellScript "cleanup" ''
           ${config.lib.bash.initHomeManagerLib}
 
           # A symbolic link whose target path matches this pattern will be
           # considered part of a Home Manager generation.
-          homeFilePattern="$(readlink -e ${lib.escapeShellArg builtins.storeDir})/*-home-manager-files/*"
+          homeFilePattern="$(readlink -e ${storeDir})/*-home-manager-files/*"
 
           newGenFiles="$1"
           shift 1
@@ -256,38 +411,64 @@ in
             fi
           done
         '';
+
+        # This activation script will
+        #
+        # 1. Remove files from the old generation that are not in the new
+        #    generation.
+        #
+        # 2. Symlink files from the new generation into $HOME.
+        #
+        # This order is needed to ensure that we always know which links
+        # belong to which generation. Specifically, if we're moving from
+        # generation A to generation B having sets of home file links FA
+        # and FB, respectively then cleaning before linking produces state
+        # transitions similar to
+        #
+        #      FA   →   FA ∩ FB   →   (FA ∩ FB) ∪ FB = FB
+        #
+        # and a failure during the intermediate state FA ∩ FB will not
+        # result in lost links because this set of links are in both the
+        # source and target generation.
+        legacyLinkGeneration = ''
+          function linkNewGen() {
+            _i "Creating home file links in %s" "$HOME"
+
+            local newGenFiles
+            newGenFiles="$(readlink -e "$newGenPath/home-files")"
+            find "$newGenFiles" \( -type f -or -type l \) \
+              -exec bash ${legacyLink} "$newGenFiles" {} +
+          }
+
+          function cleanOldGen() {
+            if [[ ! -v oldGenPath || ! -e "$oldGenPath/home-files" ]] ; then
+              return
+            fi
+
+            _i "Cleaning up orphan links from %s" "$HOME"
+
+            local newGenFiles oldGenFiles
+            newGenFiles="$(readlink -e "$newGenPath/home-files")"
+            oldGenFiles="$(readlink -e "$oldGenPath/home-files")"
+
+            # Apply the cleanup script on each leaf in the old
+            # generation. The find command below will print the
+            # relative path of the entry.
+            find "$oldGenFiles" '(' -type f -or -type l ')' -printf '%P\0' \
+              | xargs -0 bash ${legacyCleanup} "$newGenFiles"
+          }
+
+          cleanOldGen
+          linkNewGen
+        '';
+
+        putterLinkGeneration = ''
+          ${lib.getExe pkgs.putter} apply $VERBOSE_ARG ''${DRY_RUN:+--dry-run} \
+            --state-file ${lib.escapeShellArg putterStatePath} \
+            ${config.home.internal.filePutterConfig}
+        '';
       in
-      ''
-        function linkNewGen() {
-          _i "Creating home file links in %s" "$HOME"
-
-          local newGenFiles
-          newGenFiles="$(readlink -e "$newGenPath/home-files")"
-          find "$newGenFiles" \( -type f -or -type l \) \
-            -exec bash ${link} "$newGenFiles" {} +
-        }
-
-        function cleanOldGen() {
-          if [[ ! -v oldGenPath || ! -e "$oldGenPath/home-files" ]] ; then
-            return
-          fi
-
-          _i "Cleaning up orphan links from %s" "$HOME"
-
-          local newGenFiles oldGenFiles
-          newGenFiles="$(readlink -e "$newGenPath/home-files")"
-          oldGenFiles="$(readlink -e "$oldGenPath/home-files")"
-
-          # Apply the cleanup script on each leaf in the old
-          # generation. The find command below will print the
-          # relative path of the entry.
-          find "$oldGenFiles" '(' -type f -or -type l ')' -printf '%P\0' \
-            | xargs -0 bash ${cleanup} "$newGenFiles"
-        }
-
-        cleanOldGen
-        linkNewGen
-      ''
+      if config.home.fileActivator == "putter" then putterLinkGeneration else legacyLinkGeneration
     );
 
     home.activation.checkFilesChanged = lib.hm.dag.entryBefore [ "linkGeneration" ] (
@@ -333,6 +514,18 @@ in
         fi
       '') (lib.filter (v: v.onChange != "") cfg)
     );
+
+    home.internal.filePutterConfig =
+      let
+        putter = import ./lib/putter.nix { inherit lib; };
+        manifest = putter.mkPutterManifest {
+          inherit putterStatePath;
+          sourceBaseDirectory = config.home-files;
+          targetBaseDirectory = config.home.homeDirectory;
+          fileEntries = cfg;
+        };
+      in
+      pkgs.writeText "hm-putter.json" manifest;
 
     # Symlink directories and files that have the right execute bit.
     # Copy files that need their execute bit changed.
